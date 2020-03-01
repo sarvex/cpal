@@ -7,8 +7,9 @@ use self::wasm_bindgen::prelude::*;
 use self::wasm_bindgen::JsCast;
 use self::web_sys::{AudioContext, AudioContextOptions};
 use crate::{
-    BuildStreamError, Data, DefaultFormatError, DeviceNameError, DevicesError, Format,
-    PauseStreamError, PlayStreamError, StreamError, SupportedFormat, SupportedFormatsError,
+    BuildStreamError, Data, DefaultStreamConfigError, DeviceNameError, DevicesError,
+    PauseStreamError, PlayStreamError, StreamConfig, StreamError, SupportedStreamConfig,
+    SupportedStreamConfigRange, SupportedStreamConfigsError,
 };
 use std::ops::DerefMut;
 use std::sync::{Arc, Mutex, RwLock};
@@ -28,8 +29,8 @@ pub struct Stream {
     on_ended_closures: Vec<Arc<RwLock<Option<Closure<dyn FnMut()>>>>>,
 }
 
-pub type SupportedInputFormats = ::std::vec::IntoIter<SupportedFormat>;
-pub type SupportedOutputFormats = ::std::vec::IntoIter<SupportedFormat>;
+pub type SupportedInputConfigs = ::std::vec::IntoIter<SupportedStreamConfigRange>;
+pub type SupportedOutputConfigs = ::std::vec::IntoIter<SupportedStreamConfigRange>;
 
 impl Host {
     pub fn new() -> Result<Self, crate::HostUnavailable> {
@@ -72,12 +73,16 @@ impl Device {
     }
 
     #[inline]
-    fn supported_input_formats(&self) -> Result<SupportedInputFormats, SupportedFormatsError> {
+    fn supported_input_configs(
+        &self,
+    ) -> Result<SupportedInputConfigs, SupportedStreamConfigsError> {
         unimplemented!();
     }
 
     #[inline]
-    fn supported_output_formats(&self) -> Result<SupportedOutputFormats, SupportedFormatsError> {
+    fn supported_output_configs(
+        &self,
+    ) -> Result<SupportedOutputConfigs, SupportedStreamConfigsError> {
         // TODO: right now cpal's API doesn't allow flexibility here
         //       "44100" and "2" (channels) have also been hard-coded in the rest of the code ; if
         //       this ever becomes more flexible, don't forget to change that
@@ -86,34 +91,34 @@ impl Device {
         //
         //       UPDATE: We can do this now. Might be best to use `crate::COMMON_SAMPLE_RATES` and
         //       filter out those that lay outside the range specified above.
-        Ok(vec![SupportedFormat {
+        Ok(vec![SupportedStreamConfigRange {
             channels: 2,
             min_sample_rate: ::SampleRate(44100),
             max_sample_rate: ::SampleRate(44100),
-            data_type: ::SampleFormat::F32,
+            sample_format: ::SampleFormat::F32,
         }]
         .into_iter())
     }
 
     #[inline]
-    fn default_input_format(&self) -> Result<Format, DefaultFormatError> {
+    fn default_input_config(&self) -> Result<SupportedStreamConfig, DefaultStreamConfigError> {
         unimplemented!();
     }
 
     #[inline]
-    fn default_output_format(&self) -> Result<Format, DefaultFormatError> {
-        // TODO: because it is hard coded, see supported_output_formats.
-        Ok(Format {
+    fn default_output_config(&self) -> Result<SupportedStreamConfig, DefaultStreamConfigError> {
+        // TODO: because it is hard coded, see supported_output_configs.
+        Ok(SupportedStreamConfig {
             channels: 2,
             sample_rate: ::SampleRate(44100),
-            data_type: ::SampleFormat::F32,
+            sample_format: ::SampleFormat::F32,
         })
     }
 }
 
 impl DeviceTrait for Device {
-    type SupportedInputFormats = SupportedInputFormats;
-    type SupportedOutputFormats = SupportedOutputFormats;
+    type SupportedInputConfigs = SupportedInputConfigs;
+    type SupportedOutputConfigs = SupportedOutputConfigs;
     type Stream = Stream;
 
     #[inline]
@@ -122,32 +127,33 @@ impl DeviceTrait for Device {
     }
 
     #[inline]
-    fn supported_input_formats(
+    fn supported_input_configs(
         &self,
-    ) -> Result<Self::SupportedInputFormats, SupportedFormatsError> {
-        Device::supported_input_formats(self)
+    ) -> Result<Self::SupportedInputConfigs, SupportedStreamConfigsError> {
+        Device::supported_input_configs(self)
     }
 
     #[inline]
-    fn supported_output_formats(
+    fn supported_output_configs(
         &self,
-    ) -> Result<Self::SupportedOutputFormats, SupportedFormatsError> {
-        Device::supported_output_formats(self)
+    ) -> Result<Self::SupportedOutputConfigs, SupportedStreamConfigsError> {
+        Device::supported_output_configs(self)
     }
 
     #[inline]
-    fn default_input_format(&self) -> Result<Format, DefaultFormatError> {
-        Device::default_input_format(self)
+    fn default_input_config(&self) -> Result<SupportedStreamConfig, DefaultStreamConfigError> {
+        Device::default_input_config(self)
     }
 
     #[inline]
-    fn default_output_format(&self) -> Result<Format, DefaultFormatError> {
-        Device::default_output_format(self)
+    fn default_output_config(&self) -> Result<SupportedStreamConfig, DefaultStreamConfigError> {
+        Device::default_output_config(self)
     }
 
     fn build_input_stream_raw<D, E>(
         &self,
-        _format: &Format,
+        _config: &StreamConfig,
+        _sample_format: SampleFormat,
         _data_callback: D,
         _error_callback: E,
     ) -> Result<Self::Stream, BuildStreamError>
@@ -161,7 +167,8 @@ impl DeviceTrait for Device {
     /// Create an output stream.
     fn build_output_stream_raw<D, E>(
         &self,
-        format: &Format,
+        config: &StreamConfig,
+        sample_format: SampleFormat,
         data_callback: D,
         _error_callback: E,
     ) -> Result<Self::Stream, BuildStreamError>
@@ -170,18 +177,18 @@ impl DeviceTrait for Device {
         E: FnMut(StreamError) + Send + 'static,
     {
         assert_eq!(
-            format.data_type,
+            sample_format,
             SampleFormat::F32,
             "WebAudio backend currently only supports `f32` data",
         );
 
         // Use a buffer period of 1/3s for this early proof of concept.
-        let buffer_length = (format.sample_rate.0 as f64 / 3.0).round() as usize;
+        let buffer_length = (config.sample_rate.0 as f64 / 3.0).round() as usize;
         let data_callback = Arc::new(Mutex::new(Box::new(data_callback)));
 
         // Create the WebAudio stream.
         let mut stream_opts = AudioContextOptions::new();
-        stream_opts.sample_rate(format.sample_rate.0 as f32);
+        stream_opts.sample_rate(config.sample_rate.0 as f32);
         let ctx = Arc::new(
             AudioContext::new_with_context_options(&stream_opts).map_err(
                 |err| -> BuildStreamError {
@@ -201,21 +208,21 @@ impl DeviceTrait for Device {
         // Create a set of closures / callbacks which will continuously fetch and schedule sample playback.
         // Starting with two workers, eg a front and back buffer so that audio frames can be fetched in the background.
         for _i in 0..2 {
-            let format = format.clone();
+            let config = config.clone();
             let data_callback_handle = data_callback.clone();
             let ctx_handle = ctx.clone();
             let time_handle = time.clone();
 
             // A set of temporary buffers to be used for intermediate sample transformation steps.
-            let mut temporary_buffer = vec![0f32; buffer_length * format.channels as usize];
+            let mut temporary_buffer = vec![0f32; buffer_length * config.channels as usize];
             let mut temporary_channel_buffer = vec![0f32; buffer_length];
 
             // Create a webaudio buffer which will be reused to avoid allocations.
             let ctx_buffer = ctx
                 .create_buffer(
-                    format.channels as u32,
+                    config.channels as u32,
                     buffer_length as u32,
-                    format.sample_rate.0 as f32,
+                    config.sample_rate.0 as f32,
                 )
                 .map_err(|err| -> BuildStreamError {
                     let description = format!("{:?}", err);
@@ -258,10 +265,10 @@ impl DeviceTrait for Device {
                     // Deinterleave the sample data and copy into the audio context buffer.
                     // We do not reference the audio context buffer directly eg getChannelData.
                     // As wasm-bindgen only gives us a copy, not a direct reference.
-                    for channel in 0..(format.channels as usize) {
+                    for channel in 0..(config.channels as usize) {
                         for i in 0..buffer_length {
                             temporary_channel_buffer[i] =
-                                temporary_buffer[(format.channels as usize) * i + channel];
+                                temporary_buffer[(config.channels as usize) * i + channel];
                         }
                         ctx_buffer
                             .copy_to_channel(&mut temporary_channel_buffer, channel as i32)
@@ -294,7 +301,7 @@ impl DeviceTrait for Device {
 
                     // Keep track of when the next buffer worth of samples should be played.
                     *time_handle.write().unwrap() = time_at_start_of_buffer
-                        + (buffer_length as f64 / format.sample_rate.0 as f64);
+                        + (buffer_length as f64 / config.sample_rate.0 as f64);
                 }) as Box<dyn FnMut()>));
 
             on_ended_closures.push(on_ended_closure);

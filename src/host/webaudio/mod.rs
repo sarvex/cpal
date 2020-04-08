@@ -5,7 +5,7 @@ extern crate web_sys;
 use self::js_sys::eval;
 use self::wasm_bindgen::prelude::*;
 use self::wasm_bindgen::JsCast;
-use self::web_sys::{AudioContext, AudioContextOptions};
+use self::web_sys::{AudioBuffer, AudioContext, AudioContextOptions};
 use crate::{
     BuildStreamError, Data, DefaultStreamConfigError, DeviceNameError, DevicesError,
     PauseStreamError, PlayStreamError, StreamConfig, StreamError, SupportedStreamConfig,
@@ -15,6 +15,11 @@ use std::ops::DerefMut;
 use std::sync::{Arc, Mutex, RwLock};
 use traits::{DeviceTrait, HostTrait, StreamTrait};
 use {BackendSpecificError, SampleFormat};
+
+#[wasm_bindgen]
+extern "C" {
+    fn copy_audio_buffer(dest: &AudioBuffer, src: &[f32], channel: i32);
+}
 
 /// Content is false if the iterator is empty.
 pub struct Devices(bool);
@@ -270,9 +275,13 @@ impl DeviceTrait for Device {
                             temporary_channel_buffer[i] =
                                 temporary_buffer[(config.channels as usize) * i + channel];
                         }
-                        ctx_buffer
-                            .copy_to_channel(&mut temporary_channel_buffer, channel as i32)
-                            .expect("Unable to write sample data into the audio context buffer");
+
+                        // Use JS to copy the audio buffer, so that this works when run through
+                        // web workers. When crossing the Rust -> JS gap, the
+                        // `temporary_channel_buffer` is turned into an `ArrayBufferView`, and the
+                        // external JS function (from `js/cpal.js`) turns it into an owned
+                        // `ArrayBuffer` before calling `AudioBuffer::copyToChannel`.
+                        copy_audio_buffer(&ctx_buffer, &temporary_channel_buffer, channel as i32);
                     }
 
                     // Create an AudioBufferSourceNode, scheduled it to playback the reused buffer in the future.
